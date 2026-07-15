@@ -1044,7 +1044,15 @@ export default function Home() {
     const autoLow = coarse && hardware <= 6;
     const budget = quality === 'performance' || (quality === 'auto' && autoLow) ? 24 : quality === 'cinematic' ? 46 : 34;
     const resolvedQuality = quality === 'cinematic' && !autoLow ? 'cinematic' : 'performance';
-    const engine = new Game3D(canvas, resolvedQuality, coarse);
+    let engine: Game3D | null = null;
+    let fallbackContext: CanvasRenderingContext2D | null = null;
+    try {
+      engine = new Game3D(canvas, resolvedQuality, coarse);
+    } catch (error) {
+      console.warn('WebGL unavailable, using Canvas 2D compatibility renderer.', error);
+      fallbackContext = canvas.getContext('2d', { alpha: false });
+    }
+    if (!engine && !fallbackContext) return;
     engineRef.current = engine;
 
     const loop = (now: number) => {
@@ -1053,7 +1061,7 @@ export default function Home() {
       const rect = canvas.getBoundingClientRect();
       const dprCap = quality === 'performance' || (quality === 'auto' && autoLow) ? 1 : quality === 'cinematic' ? 2 : 1.55;
       const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-      engine.resize(rect.width, rect.height, dpr);
+      engine?.resize(rect.width, rect.height, dpr);
       runtime.width = rect.width;
       runtime.height = rect.height;
       updateRuntime(runtime, delta, budget);
@@ -1071,7 +1079,18 @@ export default function Home() {
         zombies: runtime.zombies,
         barricades: runtime.barricades,
       };
-      engine.render(snapshot, delta, motion);
+      if (engine) {
+        engine.render(snapshot, delta, motion);
+      } else if (fallbackContext) {
+        const pixelWidth = Math.max(1, Math.round(rect.width * dpr));
+        const pixelHeight = Math.max(1, Math.round(rect.height * dpr));
+        if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+          canvas.width = pixelWidth;
+          canvas.height = pixelHeight;
+        }
+        fallbackContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+        drawWorld(fallbackContext, runtime, rect.width, rect.height, backgroundRef.current, !motion, resolvedQuality);
+      }
 
       if (now - lastHudRef.current > 90) {
         lastHudRef.current = now;
@@ -1091,7 +1110,7 @@ export default function Home() {
     return () => {
       cancelAnimationFrame(frame);
       if (engineRef.current === engine) engineRef.current = null;
-      engine.dispose();
+      engine?.dispose();
     };
   }, [bestScore, coarse, motion, quality, screen, updateRuntime]);
 
