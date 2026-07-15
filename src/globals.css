@@ -543,6 +543,58 @@ select:focus-visible {
   opacity: 0.09;
 }
 
+.aim-reticle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 7;
+  width: 42px;
+  height: 42px;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 2px 4px #000);
+}
+
+.aim-reticle i {
+  position: absolute;
+  display: block;
+  background: rgba(239, 242, 226, 0.92);
+  transition: background 80ms ease, transform 80ms ease;
+}
+
+.aim-reticle i:nth-child(1),
+.aim-reticle i:nth-child(2) {
+  top: 20px;
+  width: 10px;
+  height: 1px;
+}
+
+.aim-reticle i:nth-child(1) { left: 1px; }
+.aim-reticle i:nth-child(2) { right: 1px; }
+
+.aim-reticle i:nth-child(3),
+.aim-reticle i:nth-child(4) {
+  left: 20px;
+  width: 1px;
+  height: 10px;
+}
+
+.aim-reticle i:nth-child(3) { top: 1px; }
+.aim-reticle i:nth-child(4) { bottom: 1px; }
+
+.aim-reticle.hit i { background: #fff; transform: scale(1.35); }
+.aim-reticle.headshot i { background: var(--acid-bright); transform: scale(1.55); box-shadow: 0 0 8px var(--acid); }
+
+.damage-vignette {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  background: radial-gradient(circle, transparent 25%, rgba(138, 8, 5, 0.78) 100%);
+  mix-blend-mode: screen;
+  transition: opacity 70ms linear;
+}
+
 .combat-topbar {
   position: absolute;
   top: max(15px, env(safe-area-inset-top));
@@ -762,6 +814,64 @@ select:focus-visible {
   font-style: normal;
   font-weight: 900;
 }
+
+.barricade-hud {
+  position: absolute;
+  top: 86px;
+  left: max(18px, env(safe-area-inset-left));
+  z-index: 7;
+  display: grid;
+  gap: 5px;
+  width: 154px;
+  pointer-events: none;
+}
+
+.barricade-hud > div {
+  position: relative;
+  display: grid;
+  min-height: 36px;
+  grid-template-columns: 40px 1fr 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 7px;
+  overflow: hidden;
+  border-left: 2px solid var(--acid);
+  background: linear-gradient(90deg, rgba(6, 11, 10, 0.88), rgba(6, 11, 10, 0.38));
+  backdrop-filter: blur(5px);
+}
+
+.barricade-hud > div.breached { border-left-color: var(--danger); animation: threat-pulse 0.7s ease-in-out infinite; }
+.barricade-hud > div.repairing { border-left-color: var(--acid-bright); box-shadow: inset 0 0 16px rgba(184, 216, 74, 0.09); }
+.barricade-hud small { color: #8e9a94; font-size: 6px; font-weight: 900; letter-spacing: 0.08em; }
+.barricade-hud b { color: var(--bone); font-family: var(--condensed); font-size: 9px; text-align: right; }
+.barricade-hud .breached b { color: #ff7168; }
+.barricade-hud span { display: flex; gap: 2px; }
+.barricade-hud span i { width: 4px; height: 15px; transform: rotate(13deg); background: #2b312e; }
+.barricade-hud span i.intact { background: #9a6b36; box-shadow: 0 0 4px rgba(240, 154, 56, 0.3); }
+.barricade-hud em { position: absolute; right: 0; bottom: 0; left: 0; height: 2px; background: var(--acid-bright); box-shadow: 0 0 8px var(--acid); }
+
+.repair-prompt {
+  position: absolute;
+  bottom: 19%;
+  left: 50%;
+  z-index: 8;
+  min-width: min(310px, 70vw);
+  padding: 8px 12px;
+  border: 1px solid rgba(231, 232, 223, 0.22);
+  background: rgba(5, 9, 9, 0.72);
+  transform: translateX(-50%);
+  pointer-events: none;
+  color: #aeb8b3;
+  font-family: var(--condensed);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  text-align: center;
+  backdrop-filter: blur(6px);
+}
+
+.repair-prompt.active { border-color: var(--acid); color: var(--acid-bright); }
+.repair-prompt > span { display: block; height: 3px; margin-top: 6px; background: rgba(255, 255, 255, 0.12); }
+.repair-prompt > span i { display: block; height: 100%; background: var(--acid); box-shadow: 0 0 9px var(--acid); }
 
 .briefing-toast {
   position: absolute;
@@ -1191,6 +1301,8 @@ select:focus-visible {
   .combat-brand span { font-size: 13px; }
   .top-actions button { width: 34px; height: 34px; }
   .squad-hud { top: 68px; right: 10px; width: 164px; }
+  .barricade-hud { top: 68px; left: 10px; width: 132px; }
+  .barricade-hud > div { min-height: 31px; grid-template-columns: 32px 1fr 26px; padding: 4px 5px; }
   .squad-hud > button { min-height: 36px; grid-template-columns: 28px 1fr auto; padding: 3px; }
   .squad-avatar { width: 27px; height: 27px; }
   .squad-copy small { display: none; }
@@ -1258,8 +1370,8 @@ select:focus-visible {
     bottom: max(75px, calc(env(safe-area-inset-bottom) + 48px));
     z-index: 14;
     display: grid;
-    width: 190px;
-    height: 155px;
+    width: 236px;
+    height: 170px;
     pointer-events: none;
   }
   .mobile-actions button {
@@ -1298,6 +1410,15 @@ select:focus-visible {
   }
   .reload-action { right: 99px; bottom: 10px; }
   .sprint-action { right: 53px; bottom: 93px; }
+  .repair-action {
+    right: 128px;
+    bottom: 82px;
+    width: 68px;
+    height: 68px;
+    border-color: rgba(184, 216, 74, 0.58);
+    background: rgba(70, 86, 28, 0.52);
+    color: var(--acid-bright);
+  }
   .health-hud,
   .weapon-hud { bottom: max(8px, env(safe-area-inset-bottom)); }
   .inventory-pills,
@@ -1331,6 +1452,10 @@ select:focus-visible {
   .squad-copy,
   .squad-hud em { display: none; }
   .squad-avatar { width: 32px; height: 32px; }
+  .barricade-hud { top: 70px; left: 8px; width: 108px; }
+  .barricade-hud > div { grid-template-columns: 26px 1fr; gap: 3px; }
+  .barricade-hud b { display: none; }
+  .barricade-hud span i { width: 3px; height: 12px; }
   .briefing-toast { top: 18%; min-width: calc(100% - 28px); padding: 10px 14px; }
   .health-number strong { font-size: 41px; }
   .vitals { width: 105px; }
@@ -1338,6 +1463,7 @@ select:focus-visible {
   .ammo-readout strong { font-size: 45px; }
   .mobile-move-zone { bottom: 96px; left: 18px; width: 126px; height: 126px; }
   .mobile-actions { right: 12px; bottom: 88px; transform: scale(0.9); transform-origin: bottom right; }
+  .repair-prompt { bottom: 25%; min-width: min(280px, 78vw); font-size: 8px; }
   .mobile-look-zone { top: 19%; bottom: 27%; left: 30%; }
   .pause-card { padding: 20px; }
   .pause-settings { grid-template-columns: 1fr; }
