@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Game3D, type RayHit, type WorldSnapshot } from './game3d';
 
 type Screen = 'menu' | 'playing' | 'paused' | 'dead' | 'victory';
 type DifficultyId = 'survivor' | 'veteran' | 'nightmare';
@@ -16,11 +17,22 @@ type Zombie = {
   maxHp: number;
   speed: number;
   type: ZombieType;
+  lane: number;
   phase: number;
   hit: number;
   attack: number;
   dead: boolean;
   death: number;
+};
+
+type Barricade = {
+  lane: number;
+  x: number;
+  planks: number;
+  maxPlanks: number;
+  plankHp: number;
+  hit: number;
+  repair: number;
 };
 
 type Particle = {
@@ -45,6 +57,7 @@ type Squadmate = {
 type Runtime = {
   difficulty: DifficultyId;
   playerX: number;
+  playerZ: number;
   aimX: number;
   aimY: number;
   health: number;
@@ -59,6 +72,8 @@ type Runtime = {
   combo: number;
   comboTime: number;
   wave: number;
+  waveBreak: number;
+  spawnRemaining: number;
   intensity: number;
   spawnTimer: number;
   squadTimer: number;
@@ -85,12 +100,15 @@ type Runtime = {
   nextId: number;
   zombies: Zombie[];
   particles: Particle[];
+  barricades: Barricade[];
   squad: Squadmate[];
   keys: Set<string>;
   moveX: number;
   moveY: number;
   sprintHeld: boolean;
   fireHeld: boolean;
+  repairHeld: boolean;
+  repairTarget: number;
   won: boolean;
 };
 
@@ -104,6 +122,9 @@ type Hud = {
   score: number;
   kills: number;
   wave: number;
+  waveBreak: number;
+  alive: number;
+  spawnRemaining: number;
   intensity: number;
   weapon: WeaponId;
   ammo: number;
@@ -115,6 +136,11 @@ type Hud = {
   combo: number;
   fps: number;
   squad: Squadmate[];
+  barricades: Barricade[];
+  repairTarget: number;
+  damageFlash: number;
+  hitMarker: number;
+  hitHeadshot: boolean;
 };
 
 const DIFFICULTIES: Record<DifficultyId, { label: string; note: string; scalar: number; reward: number }> = {
@@ -144,6 +170,9 @@ const EMPTY_HUD: Hud = {
   score: 0,
   kills: 0,
   wave: 1,
+  waveBreak: 0,
+  alive: 0,
+  spawnRemaining: 12,
   intensity: 0,
   weapon: 'carbine',
   ammo: 30,
@@ -155,6 +184,11 @@ const EMPTY_HUD: Hud = {
   combo: 0,
   fps: 60,
   squad: INITIAL_SQUAD,
+  barricades: [-3.5, 0, 3.5].map((x, lane) => ({ lane, x, planks: 5, maxPlanks: 5, plankHp: 58, hit: 0, repair: 0 })),
+  repairTarget: -1,
+  damageFlash: 0,
+  hitMarker: 0,
+  hitHeadshot: false,
 };
 
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
@@ -164,6 +198,7 @@ function makeRuntime(difficulty: DifficultyId): Runtime {
   return {
     difficulty,
     playerX: 0,
+    playerZ: 1.15,
     aimX: 0,
     aimY: 0,
     health: 100,
@@ -178,6 +213,8 @@ function makeRuntime(difficulty: DifficultyId): Runtime {
     combo: 0,
     comboTime: 0,
     wave: 1,
+    waveBreak: 0,
+    spawnRemaining: 12,
     intensity: 0,
     spawnTimer: 0.2,
     squadTimer: 0.65,
@@ -204,12 +241,15 @@ function makeRuntime(difficulty: DifficultyId): Runtime {
     nextId: 1,
     zombies: [],
     particles: [],
+    barricades: [-3.5, 0, 3.5].map((x, lane) => ({ lane, x, planks: 5, maxPlanks: 5, plankHp: 58, hit: 0, repair: 0 })),
     squad: INITIAL_SQUAD.map((mate) => ({ ...mate })),
     keys: new Set(),
     moveX: 0,
     moveY: 0,
     sprintHeld: false,
     fireHeld: false,
+    repairHeld: false,
+    repairTarget: -1,
     won: false,
   };
 }
@@ -528,6 +568,9 @@ function hudFromRuntime(runtime: Runtime): Hud {
     score: runtime.score,
     kills: runtime.kills,
     wave: runtime.wave,
+    waveBreak: runtime.waveBreak,
+    alive: runtime.zombies.filter((zombie) => !zombie.dead).length,
+    spawnRemaining: runtime.spawnRemaining,
     intensity: runtime.intensity,
     weapon: runtime.weapon,
     ammo: runtime.ammo[runtime.weapon],
@@ -539,11 +582,17 @@ function hudFromRuntime(runtime: Runtime): Hud {
     combo: runtime.combo,
     fps: runtime.fps,
     squad: runtime.squad.map((mate) => ({ ...mate })),
+    barricades: runtime.barricades.map((barricade) => ({ ...barricade })),
+    repairTarget: runtime.repairTarget,
+    damageFlash: runtime.damageFlash,
+    hitMarker: runtime.hitMarker,
+    hitHeadshot: runtime.hitHeadshot,
   };
 }
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const engineRef = useRef<Game3D | null>(null);
   const runtimeRef = useRef<Runtime | null>(null);
   const backgroundRef = useRef<HTMLImageElement | null>(null);
   const screenRef = useRef<Screen>('menu');
@@ -588,7 +637,7 @@ export default function Home() {
     void audioRef.current?.resume();
   }, []);
 
-  const playSound = useCallback((kind: 'shot' | 'shotgun' | 'hit' | 'empty' | 'reload' | 'heal' | 'boom' | 'ui') => {
+  const playSound = useCallback((kind: 'shot' | 'shotgun' | 'hit' | 'empty' | 'reload' | 'heal' | 'boom' | 'repair' | 'ui') => {
     if (!soundRef.current) return;
     const audio = audioRef.current;
     if (!audio) return;
@@ -599,7 +648,7 @@ export default function Home() {
     const settings = {
       shot: [92, 0.06, 0.22], shotgun: [58, 0.13, 0.34], hit: [310, 0.045, 0.08],
       empty: [780, 0.035, 0.06], reload: [180, 0.08, 0.08], heal: [520, 0.16, 0.08],
-      boom: [42, 0.28, 0.42], ui: [620, 0.06, 0.07],
+      boom: [42, 0.28, 0.42], repair: [240, 0.11, 0.12], ui: [620, 0.06, 0.07],
     }[kind];
     oscillator.type = kind === 'boom' || kind === 'shotgun' ? 'sawtooth' : kind === 'shot' ? 'square' : 'sine';
     oscillator.frequency.setValueAtTime(settings[0], now);
@@ -623,14 +672,17 @@ export default function Home() {
     const type = forcedType ?? (runtime.wave >= 4 && roll > 0.91 ? 'brute' : runtime.wave >= 3 && roll > 0.8 ? 'toxic' : roll > 0.62 ? 'runner' : 'walker');
     const baseHp = type === 'brute' ? 260 : type === 'toxic' ? 96 : type === 'runner' ? 62 : 82;
     const speed = type === 'brute' ? 0.48 : type === 'runner' ? 1.4 : type === 'toxic' ? 0.76 : 0.7;
+    const lane = Math.floor(Math.random() * runtime.barricades.length);
+    const barricade = runtime.barricades[lane];
     runtime.zombies.push({
       id: runtime.nextId++,
-      x: (Math.random() - 0.5) * 8.5,
-      z: 22 + Math.random() * 21,
+      x: barricade.x + (Math.random() - 0.5) * 1.3,
+      z: 24 + Math.random() * 20,
       hp: baseHp * scalar,
       maxHp: baseHp * scalar,
       speed: speed * (0.9 + runtime.wave * 0.045) * scalar,
       type,
+      lane,
       phase: Math.random() * Math.PI * 2,
       hit: 0,
       attack: 0,
@@ -677,6 +729,7 @@ export default function Home() {
     }
 
     runtime.lastShot = runtime.time;
+    runtime.repairHeld = false;
     runtime.ammo[runtime.weapon] -= 1;
     runtime.recoil = runtime.weapon === 'shotgun' ? 1.25 : Math.min(1, runtime.recoil + 0.42);
     runtime.shake = runtime.weapon === 'shotgun' ? 0.9 : 0.35;
@@ -684,44 +737,23 @@ export default function Home() {
     playSound(runtime.weapon === 'shotgun' ? 'shotgun' : 'shot');
     vibrate(runtime.weapon === 'shotgun' ? 26 : 8);
 
-    const width = runtime.width;
-    const height = runtime.height;
-    const crossX = width / 2 + runtime.aimX * width * 0.23;
-    const crossY = height / 2 + runtime.aimY * height * 0.18;
     const pellets = runtime.weapon === 'shotgun' ? 7 : 1;
-    const damageMap = new Map<number, { damage: number; head: boolean; x: number; y: number }>();
-
-    for (let pellet = 0; pellet < pellets; pellet += 1) {
-      const spread = runtime.weapon === 'shotgun' ? Math.min(width, height) * 0.046 : Math.min(width, height) * (0.004 + runtime.recoil * 0.002);
-      const aimX = crossX + (Math.random() - 0.5) * spread;
-      const aimY = crossY + (Math.random() - 0.5) * spread;
-      let best: { zombie: Zombie; score: number; projected: ReturnType<typeof projectZombie>; head: boolean } | null = null;
-      for (const zombie of runtime.zombies) {
-        if (zombie.dead || zombie.z > 46 || zombie.z < 0.3) continue;
-        const projected = projectZombie(zombie, runtime, width, height);
-        const dx = aimX - projected.x;
-        const dy = aimY - projected.centerY;
-        const normalized = Math.hypot(dx, dy) / Math.max(14, projected.radius);
-        if (normalized <= 1.35) {
-          const score = normalized + zombie.z * 0.002;
-          const head = aimY < projected.bottom - projected.height * 0.72;
-          if (!best || score < best.score) best = { zombie, score, projected, head };
-        }
-      }
-
-      if (best) {
-        const base = runtime.weapon === 'shotgun' ? 22 : 34;
-        const falloff = runtime.weapon === 'shotgun' ? clamp(1.2 - best.zombie.z / 28, 0.32, 1) : clamp(1.12 - best.zombie.z / 100, 0.7, 1);
-        const amount = base * falloff * (best.head ? 2.05 : 1);
-        const previous = damageMap.get(best.zombie.id);
-        damageMap.set(best.zombie.id, {
-          damage: (previous?.damage ?? 0) + amount,
-          head: (previous?.head ?? false) || best.head,
-          x: best.projected.x,
-          y: best.projected.centerY,
-        });
-      }
-    }
+    const rayHits: RayHit[] = engineRef.current?.raycast(pellets, runtime.weapon === 'shotgun' ? 0.085 : 0.008 + runtime.recoil * 0.003) ?? [];
+    const damageMap = new Map<number, { damage: number; head: boolean; point: [number, number, number] }>();
+    rayHits.forEach((rayHit) => {
+      const zombie = runtime.zombies.find((item) => item.id === rayHit.zombieId);
+      if (!zombie || zombie.dead) return;
+      const base = runtime.weapon === 'shotgun' ? 24 : 36;
+      const range = Math.max(0, zombie.z - runtime.playerZ);
+      const falloff = runtime.weapon === 'shotgun' ? clamp(1.18 - range / 29, 0.34, 1) : clamp(1.1 - range / 105, 0.72, 1);
+      const amount = base * falloff * (rayHit.head ? 2.15 : 1);
+      const previous = damageMap.get(zombie.id);
+      damageMap.set(zombie.id, {
+        damage: (previous?.damage ?? 0) + amount,
+        head: (previous?.head ?? false) || rayHit.head,
+        point: rayHit.point,
+      });
+    });
 
     damageMap.forEach((hit, id) => {
       const zombie = runtime.zombies.find((item) => item.id === id);
@@ -730,7 +762,7 @@ export default function Home() {
       zombie.hit = 0.09;
       runtime.hitMarker = 0.12;
       runtime.hitHeadshot = hit.head;
-      createImpact(runtime, hit.x, hit.y, hit.head ? '#d9ee78' : '#c84d3f', hit.head ? 12 : 7);
+      engineRef.current?.addImpact(hit.point, hit.head);
       playSound('hit');
       if (zombie.hp <= 0) {
         zombie.dead = true;
@@ -746,15 +778,16 @@ export default function Home() {
     });
 
     if (runtime.ammo[runtime.weapon] === 0) window.setTimeout(beginReload, 180);
-  }, [beginReload, createImpact, playSound, vibrate]);
+  }, [beginReload, playSound, vibrate]);
 
   const throwGrenade = useCallback(() => {
     const runtime = runtimeRef.current;
     if (!runtime || screenRef.current !== 'playing' || runtime.grenades <= 0) return;
     runtime.grenades -= 1;
     runtime.shake = 1.8;
-    const targetX = runtime.playerX + runtime.aimX * 5;
-    const targetZ = 7 + (1 - runtime.aimY) * 4;
+    const target = engineRef.current?.getAimPoint(10) ?? { x: runtime.playerX, z: runtime.playerZ + 9 };
+    const targetX = clamp(target.x, -6, 6);
+    const targetZ = clamp(target.z, 5.5, 22);
     let hits = 0;
     runtime.zombies.forEach((zombie) => {
       if (zombie.dead) return;
@@ -771,12 +804,10 @@ export default function Home() {
         hits += 1;
       }
     });
-    const x = runtime.width / 2 + runtime.aimX * runtime.width * 0.23;
-    const y = runtime.height / 2 + runtime.aimY * runtime.height * 0.18;
-    createImpact(runtime, x, y, '#ff9a36', 34 + hits * 2);
+    engineRef.current?.addExplosion(targetX, targetZ);
     playSound('boom');
     vibrate([35, 24, 45]);
-  }, [createImpact, playSound, vibrate]);
+  }, [playSound, vibrate]);
 
   const consumeMedkit = useCallback(() => {
     const runtime = runtimeRef.current;
@@ -832,32 +863,65 @@ export default function Home() {
     const forward = clamp(keyForward - runtime.moveY, -1, 1);
     const strafe = clamp(keyStrafe + runtime.moveX, -1, 1);
     const wantsSprint = runtime.sprintHeld || runtime.keys.has('ShiftLeft') || runtime.keys.has('ShiftRight');
-    const sprinting = wantsSprint && forward > 0.18 && runtime.stamina > 1;
+    const sprinting = wantsSprint && Math.hypot(forward, strafe) > 0.18 && runtime.stamina > 1;
     const pace = sprinting ? 1.65 : 1;
     runtime.stamina = sprinting ? Math.max(0, runtime.stamina - delta * 23) : Math.min(100, runtime.stamina + delta * 15);
-    runtime.playerX = clamp(runtime.playerX + strafe * delta * 3.2 * pace, -4.25, 4.25);
-    const advance = Math.max(0, forward) * delta * 4.9 * pace;
-    runtime.distance = Math.max(0, runtime.distance - advance);
-    runtime.worldOffset += advance * 2.4;
+    runtime.playerX = clamp(runtime.playerX + strafe * delta * 3.25 * pace, -4.8, 4.8);
+    runtime.playerZ = clamp(runtime.playerZ + forward * delta * 2.45 * pace, 0.35, 2.55);
+    runtime.worldOffset += Math.hypot(strafe, forward) * delta * pace;
 
-    runtime.wave = Math.min(7, 1 + Math.floor(runtime.time / 31));
-    const pressure = clamp(runtime.zombies.filter((zombie) => !zombie.dead && zombie.z < 10).length / 9, 0, 1);
-    runtime.intensity += (clamp(pressure * 0.72 + runtime.wave * 0.055 + (100 - runtime.health) * 0.002, 0, 1) - runtime.intensity) * delta * 1.8;
-    runtime.spawnTimer -= delta;
-    if (!runtime.extracting && runtime.distance <= 0) {
-      runtime.extracting = true;
-      runtime.extractTime = 25;
-      for (let i = 0; i < 6; i += 1) spawnZombie(runtime, i === 5 ? 'brute' : undefined);
-    }
-    if (runtime.extracting) {
-      runtime.extractTime -= delta;
-      if (runtime.extractTime <= 0) runtime.won = true;
+    runtime.barricades.forEach((barricade) => {
+      barricade.hit = Math.max(0, barricade.hit - delta);
+      if (barricade.lane !== runtime.repairTarget) barricade.repair = Math.max(0, barricade.repair - delta * 1.8);
+    });
+    runtime.repairTarget = -1;
+    if (runtime.repairHeld) {
+      const nearest = [...runtime.barricades]
+        .filter((barricade) => barricade.planks < barricade.maxPlanks)
+        .sort((a, b) => Math.abs(a.x - runtime.playerX) - Math.abs(b.x - runtime.playerX))[0];
+      if (nearest && Math.abs(nearest.x - runtime.playerX) < 1.45 && runtime.playerZ > 0.72) {
+        runtime.repairTarget = nearest.lane;
+        nearest.repair += delta / 1.08;
+        if (nearest.repair >= 1) {
+          nearest.planks += 1;
+          nearest.plankHp = 58;
+          nearest.repair = 0;
+          runtime.score += 45 + runtime.wave * 4;
+          runtime.reserve.carbine = Math.min(360, runtime.reserve.carbine + 2);
+          engineRef.current?.addRepairBurst(nearest.x);
+          playSound('repair');
+          vibrate(12);
+        }
+      }
     }
 
-    if (runtime.spawnTimer <= 0 && runtime.zombies.filter((zombie) => !zombie.dead).length < budget) {
-      const burst = runtime.extracting ? 2 : runtime.intensity > 0.7 ? 2 : 1;
-      for (let i = 0; i < burst; i += 1) spawnZombie(runtime);
-      runtime.spawnTimer = clamp((2.35 - runtime.wave * 0.16 - runtime.intensity * 0.8) / scalar, 0.48, 2.5);
+    const aliveBeforeUpdate = runtime.zombies.filter((zombie) => !zombie.dead).length;
+    if (runtime.waveBreak > 0) {
+      runtime.waveBreak = Math.max(0, runtime.waveBreak - delta);
+      if (runtime.waveBreak === 0) {
+        runtime.wave += 1;
+        runtime.spawnRemaining = 9 + runtime.wave * 4;
+        runtime.spawnTimer = 0.2;
+        runtime.reserve.carbine = Math.min(360, runtime.reserve.carbine + 24);
+        runtime.reserve.shotgun = Math.min(96, runtime.reserve.shotgun + 8);
+        if (runtime.wave % 3 === 0) runtime.medkits = Math.min(4, runtime.medkits + 1);
+        if (runtime.wave % 2 === 0) runtime.grenades = Math.min(4, runtime.grenades + 1);
+        playSound('ui');
+      }
+    } else {
+      runtime.spawnTimer -= delta;
+      if (runtime.spawnRemaining > 0 && runtime.spawnTimer <= 0 && aliveBeforeUpdate < budget) {
+        const burst = runtime.wave >= 5 && runtime.intensity > 0.62 ? 2 : 1;
+        for (let index = 0; index < Math.min(burst, runtime.spawnRemaining); index += 1) {
+          spawnZombie(runtime, runtime.wave % 5 === 0 && runtime.spawnRemaining === 1 ? 'brute' : undefined);
+          runtime.spawnRemaining -= 1;
+        }
+        runtime.spawnTimer = clamp((1.85 - runtime.wave * 0.075 - runtime.intensity * 0.45) / scalar, 0.34, 1.9);
+      }
+      if (runtime.spawnRemaining <= 0 && aliveBeforeUpdate === 0) {
+        runtime.waveBreak = 7;
+        runtime.score += runtime.wave * 350;
+      }
     }
 
     runtime.zombies.forEach((zombie) => {
@@ -866,11 +930,36 @@ export default function Home() {
         zombie.death += delta;
         return;
       }
-      const lanePull = clamp((runtime.playerX - zombie.x) * delta * 0.23, -0.5 * delta, 0.5 * delta);
+      const barricade = runtime.barricades[zombie.lane] ?? runtime.barricades[1];
+      const targetX = zombie.z > 4.35 ? barricade.x : runtime.playerX;
+      const lanePull = clamp((targetX - zombie.x) * delta * (zombie.z > 4.35 ? 0.38 : 0.72), -0.72 * delta, 0.72 * delta);
       zombie.x += lanePull;
-      zombie.z -= (zombie.speed + Math.max(0, forward) * 0.48 * pace) * delta;
       zombie.attack -= delta;
-      if (zombie.z < 1.42 && Math.abs(zombie.x - runtime.playerX) < (zombie.type === 'brute' ? 1.55 : 1.05) && zombie.attack <= 0) {
+
+      const barrierLine = 4.72;
+      if (zombie.z > barrierLine) {
+        zombie.z -= zombie.speed * delta;
+      } else if (barricade.planks > 0 && zombie.z > 3.9) {
+        zombie.z = Math.max(4.38, zombie.z);
+        if (zombie.attack <= 0) {
+          const plankDamage = (zombie.type === 'brute' ? 31 : zombie.type === 'runner' ? 14 : zombie.type === 'toxic' ? 18 : 12) * scalar;
+          barricade.plankHp -= plankDamage;
+          barricade.hit = 0.22;
+          zombie.attack = zombie.type === 'runner' ? 0.62 : zombie.type === 'brute' ? 1.18 : 0.9;
+          runtime.shake = Math.max(runtime.shake, zombie.type === 'brute' ? 0.72 : 0.2);
+          if (barricade.plankHp <= 0) {
+            barricade.planks = Math.max(0, barricade.planks - 1);
+            barricade.plankHp = 58;
+            barricade.hit = 0.55;
+            playSound('hit');
+            vibrate(zombie.type === 'brute' ? [18, 20, 18] : 9);
+          }
+        }
+      } else {
+        zombie.z -= zombie.speed * delta;
+      }
+
+      if (zombie.z < runtime.playerZ + 1.08 && Math.abs(zombie.x - runtime.playerX) < (zombie.type === 'brute' ? 1.7 : 1.18) && zombie.attack <= 0) {
         const damage = (zombie.type === 'brute' ? 19 : zombie.type === 'runner' ? 10 : zombie.type === 'toxic' ? 13 : 8) * scalar;
         runtime.health = Math.max(0, runtime.health - damage);
         runtime.damageFlash = 1;
@@ -880,7 +969,12 @@ export default function Home() {
         vibrate([18, 26, 18]);
       }
     });
-    runtime.zombies = runtime.zombies.filter((zombie) => zombie.z > -1.4 && (!zombie.dead || zombie.death < 1.1));
+    runtime.zombies = runtime.zombies.filter((zombie) => zombie.z > runtime.playerZ - 1.8 && (!zombie.dead || zombie.death < 1.25));
+
+    const pressure = clamp(runtime.zombies.filter((zombie) => !zombie.dead && zombie.z < 11).length / 10, 0, 1);
+    const breach = 1 - runtime.barricades.reduce((sum, barricade) => sum + barricade.planks, 0) / runtime.barricades.reduce((sum, barricade) => sum + barricade.maxPlanks, 0);
+    const targetIntensity = runtime.waveBreak > 0 ? 0.08 : clamp(pressure * 0.68 + breach * 0.3 + runtime.wave * 0.025 + (100 - runtime.health) * 0.002, 0, 1);
+    runtime.intensity += (targetIntensity - runtime.intensity) * delta * 1.8;
 
     runtime.squadTimer -= delta;
     runtime.squad.forEach((mate) => { mate.assistCooldown = Math.max(0, mate.assistCooldown - delta); });
@@ -897,7 +991,7 @@ export default function Home() {
           runtime.score += 70;
         }
       }
-      if (runtime.zombies.some((zombie) => !zombie.dead && zombie.z < 2.6) && Math.random() < 0.34 * scalar) {
+      if (runtime.zombies.some((zombie) => !zombie.dead && zombie.z < 3.8) && Math.random() < 0.34 * scalar) {
         const candidates = runtime.squad.filter((mate) => !mate.downed);
         const mate = candidates[Math.floor(Math.random() * candidates.length)];
         if (mate) {
@@ -923,13 +1017,14 @@ export default function Home() {
     runtime.comboTime -= delta;
     if (runtime.comboTime <= 0) runtime.combo = 0;
     if (runtime.fireHeld) shoot();
-  }, [shoot, spawnZombie, vibrate]);
+  }, [playSound, shoot, spawnZombie, vibrate]);
 
   const startGame = useCallback(() => {
     initAudio();
     const runtime = makeRuntime(difficulty);
     runtimeRef.current = runtime;
-    for (let i = 0; i < 7; i += 1) spawnZombie(runtime, i === 5 && difficulty !== 'survivor' ? 'runner' : undefined);
+    for (let i = 0; i < 5; i += 1) spawnZombie(runtime, i === 4 && difficulty !== 'survivor' ? 'runner' : undefined);
+    runtime.spawnRemaining -= 5;
     setHud(hudFromRuntime(runtime));
     setShowBriefing(true);
     setScreen('playing');
@@ -942,14 +1037,15 @@ export default function Home() {
     const canvas = canvasRef.current;
     const runtime = runtimeRef.current;
     if (!canvas || !runtime) return;
-    const context = canvas.getContext('2d', { alpha: false });
-    if (!context) return;
 
     let frame = 0;
     let previous = performance.now();
     const hardware = navigator.hardwareConcurrency || 4;
     const autoLow = coarse && hardware <= 6;
     const budget = quality === 'performance' || (quality === 'auto' && autoLow) ? 24 : quality === 'cinematic' ? 46 : 34;
+    const resolvedQuality = quality === 'cinematic' && !autoLow ? 'cinematic' : 'performance';
+    const engine = new Game3D(canvas, resolvedQuality, coarse);
+    engineRef.current = engine;
 
     const loop = (now: number) => {
       const delta = Math.min(0.034, Math.max(0.001, (now - previous) / 1000));
@@ -957,17 +1053,25 @@ export default function Home() {
       const rect = canvas.getBoundingClientRect();
       const dprCap = quality === 'performance' || (quality === 'auto' && autoLow) ? 1 : quality === 'cinematic' ? 2 : 1.55;
       const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
-      const pixelWidth = Math.max(1, Math.round(rect.width * dpr));
-      const pixelHeight = Math.max(1, Math.round(rect.height * dpr));
-      if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
-        canvas.width = pixelWidth;
-        canvas.height = pixelHeight;
-      }
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      engine.resize(rect.width, rect.height, dpr);
       runtime.width = rect.width;
       runtime.height = rect.height;
       updateRuntime(runtime, delta, budget);
-      drawWorld(context, runtime, rect.width, rect.height, backgroundRef.current, !motion, quality === 'auto' && autoLow ? 'performance' : quality);
+      const snapshot: WorldSnapshot = {
+        time: runtime.time,
+        playerX: runtime.playerX,
+        playerZ: runtime.playerZ,
+        aimX: runtime.aimX,
+        aimY: runtime.aimY,
+        recoil: runtime.recoil,
+        muzzle: runtime.muzzle,
+        shake: runtime.shake,
+        intensity: runtime.intensity,
+        weapon: runtime.weapon,
+        zombies: runtime.zombies,
+        barricades: runtime.barricades,
+      };
+      engine.render(snapshot, delta, motion);
 
       if (now - lastHudRef.current > 90) {
         lastHudRef.current = now;
@@ -981,21 +1085,14 @@ export default function Home() {
         setScreen('dead');
         return;
       }
-      if (runtime.won) {
-        runtime.fireHeld = false;
-        const victoryScore = runtime.score + Math.round(runtime.health * 25 + runtime.extractTime * 100);
-        runtime.score = victoryScore;
-        const nextBest = Math.max(bestScore, victoryScore);
-        setBestScore(nextBest);
-        window.localStorage.setItem('dead-sector-best', String(nextBest));
-        setHud(hudFromRuntime(runtime));
-        setScreen('victory');
-        return;
-      }
       frame = requestAnimationFrame(loop);
     };
     frame = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(frame);
+    return () => {
+      cancelAnimationFrame(frame);
+      if (engineRef.current === engine) engineRef.current = null;
+      engine.dispose();
+    };
   }, [bestScore, coarse, motion, quality, screen, updateRuntime]);
 
   useEffect(() => {
@@ -1008,6 +1105,7 @@ export default function Home() {
       }
       if (!runtime || screenRef.current !== 'playing') return;
       runtime.keys.add(event.code);
+      if (event.code === 'KeyE') runtime.repairHeld = true;
       if (event.repeat) return;
       if (event.code === 'KeyR') beginReload();
       if (event.code === 'Digit1') switchWeapon('carbine');
@@ -1015,8 +1113,17 @@ export default function Home() {
       if (event.code === 'KeyG') throwGrenade();
       if (event.code === 'KeyH' || event.code === 'KeyQ') consumeMedkit();
     };
-    const keyUp = (event: KeyboardEvent) => runtimeRef.current?.keys.delete(event.code);
-    const pointerUp = () => { if (runtimeRef.current) runtimeRef.current.fireHeld = false; };
+    const keyUp = (event: KeyboardEvent) => {
+      const runtime = runtimeRef.current;
+      runtime?.keys.delete(event.code);
+      if (runtime && event.code === 'KeyE') runtime.repairHeld = false;
+    };
+    const pointerUp = () => {
+      if (!runtimeRef.current) return;
+      runtimeRef.current.fireHeld = false;
+      runtimeRef.current.repairHeld = false;
+      runtimeRef.current.sprintHeld = false;
+    };
     const visibility = () => { if (document.hidden && screenRef.current === 'playing') setScreen('paused'); };
     window.addEventListener('keydown', keyDown);
     window.addEventListener('keyup', keyUp);
@@ -1056,9 +1163,9 @@ export default function Home() {
         <div className="rain-layer" aria-hidden="true" />
         <header className="menu-header">
           <div className="brand-lockup">
-            <span className="eyebrow">ORIGINAL SURVIVAL FPS</span>
+            <span className="eyebrow">TRUE WEBGL 3D · ENDLESS SURVIVAL FPS</span>
             <h1>DEAD SECTOR<span>:</span> OUTBREAK</h1>
-            <p>SỐNG SÓT <i /> CỨU ĐỘI <i /> THOÁT KHỎI KHU CÁCH LY</p>
+            <p>ĐÓNG BARRICADE <i /> GIỮ SAFEHOUSE <i /> SỐNG QUA VÔ HẠN WAVE</p>
           </div>
           <div className="menu-squad" aria-label="Đội hình AI">
             {['NAM', 'LINH', 'PHƯỚC', 'BẠN'].map((name, index) => (
@@ -1072,13 +1179,13 @@ export default function Home() {
         </header>
 
         <section className="mission-panel">
-          <span className="panel-kicker">NHIỆM VỤ 01 · QUẬN ĐEN</span>
-          <div className="mission-objective"><b>◇</b><div><small>MỤC TIÊU</small><strong>ĐẾN ĐIỂM SƠ TÁN</strong></div></div>
-          <p>Vượt qua 260m khu phố bị phong tỏa. Giữ đội hình sống sót và trụ vững tại điểm đón.</p>
+          <span className="panel-kicker">ENDLESS 01 · SAFEHOUSE QUẬN ĐEN</span>
+          <div className="mission-objective"><b>▥</b><div><small>MỤC TIÊU</small><strong>GIỮ BARRICADE</strong></div></div>
+          <p>Bảo vệ 3 cửa sổ bằng 15 tấm ván. Zombie sẽ phá từng tấm — áp sát và giữ E hoặc nút SỬA VÁN để đóng lại.</p>
           <div className="mission-meta">
-            <span><b>4</b> THÀNH VIÊN</span>
-            <span><b>25s</b> GIỮ VỊ TRÍ</span>
-            <span><b>∞</b> AI DIRECTOR</span>
+            <span><b>3</b> BARRICADE</span>
+            <span><b>15</b> TẤM VÁN</span>
+            <span><b>∞</b> WAVE</span>
           </div>
         </section>
 
@@ -1092,7 +1199,7 @@ export default function Home() {
           </div>
           <button className="start-button" onClick={startGame}>
             <span className="start-icon">▶</span>
-            <span><small>CHƯƠNG 1 · ĐÊM PHONG TỎA</small>BẮT ĐẦU NHIỆM VỤ</span>
+            <span><small>3D WEBGL · AI DIRECTOR VÔ HẠN</small>BẮT ĐẦU SINH TỒN</span>
           </button>
           <div className="quick-settings">
             <label>ĐỒ HỌA
@@ -1111,13 +1218,15 @@ export default function Home() {
         <footer className="menu-footer">
           <span className="online-dot" /> PUBLIC BUILD · AI SQUAD SẴN SÀNG
           <span>BEST SCORE {bestScore.toLocaleString('vi-VN').padStart(6, '0')}</span>
-          <span>{coarse ? 'ĐIỀU KHIỂN CẢM ỨNG' : 'WASD · CHUỘT · R / G / H'}</span>
+          <span>{coarse ? 'JOYSTICK · KÉO NGẮM · GIỮ SỬA VÁN' : 'WASD · CHUỘT · E SỬA VÁN · R / G / H'}</span>
         </footer>
       </main>
     );
   }
 
   const outcome = screen === 'dead' || screen === 'victory';
+  const totalPlanks = hud.barricades.reduce((sum, barricade) => sum + barricade.planks, 0);
+  const maxPlanks = hud.barricades.reduce((sum, barricade) => sum + barricade.maxPlanks, 0) || 15;
   return (
     <main className="game-screen">
       <canvas
@@ -1135,15 +1244,17 @@ export default function Home() {
         onContextMenu={(event) => event.preventDefault()}
       />
       <div className="film-grain" aria-hidden="true" />
+      <div className={`aim-reticle ${hud.hitMarker > 0 ? hud.hitHeadshot ? 'headshot' : 'hit' : ''}`} aria-hidden="true"><i /><i /><i /><i /></div>
+      <div className="damage-vignette" style={{ opacity: hud.damageFlash }} aria-hidden="true" />
 
       <header className="combat-topbar">
         <div className="combat-brand"><span>DEAD SECTOR</span><small>OUTBREAK</small></div>
         <div className="objective-card">
-          <span className="objective-diamond">◇</span>
-          <div><small>{hud.extracting ? 'SƠ TÁN ĐANG ĐẾN' : 'MỤC TIÊU HIỆN TẠI'}</small><strong>{hud.extracting ? `GIỮ VỊ TRÍ · ${Math.ceil(hud.extractTime)}s` : `ĐẾN ĐIỂM SƠ TÁN · ${Math.ceil(hud.distance)}m`}</strong></div>
-          <div className="objective-progress"><span style={{ width: `${hud.extracting ? (1 - hud.extractTime / 25) * 100 : (1 - hud.distance / 260) * 100}%` }} /></div>
+          <span className="objective-diamond">▥</span>
+          <div><small>{hud.waveBreak > 0 ? 'THỜI GIAN GIA CỐ' : 'ENDLESS SURVIVAL'}</small><strong>{hud.waveBreak > 0 ? `WAVE ${hud.wave} SẠCH · WAVE SAU ${Math.ceil(hud.waveBreak)}s` : `BẢO VỆ VÁN · ${hud.alive + hud.spawnRemaining} ZOMBIE CÒN LẠI`}</strong></div>
+          <div className="objective-progress"><span style={{ width: `${totalPlanks / maxPlanks * 100}%` }} /></div>
         </div>
-        <div className="combat-stats"><span>WAVE <b>{hud.wave}</b></span><span>KILLS <b>{hud.kills}</b></span><span>{formatTime(hud.time)}</span><em className={`threat threat-${Math.ceil(hud.intensity * 3)}`}>THREAT</em></div>
+        <div className="combat-stats"><span>WAVE <b>{hud.wave}</b></span><span>KILLS <b>{hud.kills}</b></span><span>VÁN <b>{totalPlanks}/{maxPlanks}</b></span><span>{formatTime(hud.time)}</span><em className={`threat threat-${Math.max(1, Math.ceil(hud.intensity * 3))}`}>THREAT</em></div>
         <div className="top-actions">
           <button aria-label={sound ? 'Tắt âm thanh' : 'Bật âm thanh'} onClick={() => setSound((value) => !value)}>{sound ? '◖))' : '◖×'}</button>
           <button aria-label="Toàn màn hình" onClick={fullscreen}>⛶</button>
@@ -1161,9 +1272,27 @@ export default function Home() {
         ))}
       </aside>
 
+      <aside className="barricade-hud" aria-label="Tình trạng barricade">
+        {hud.barricades.map((barricade) => (
+          <div className={`${barricade.planks === 0 ? 'breached' : ''} ${hud.repairTarget === barricade.lane ? 'repairing' : ''}`} key={barricade.lane}>
+            <small>CỬA {barricade.lane + 1}</small>
+            <span>{Array.from({ length: barricade.maxPlanks }, (_, index) => <i className={index < barricade.planks ? 'intact' : ''} key={index} />)}</span>
+            <b>{barricade.planks === 0 ? 'BREACH' : `${barricade.planks}/${barricade.maxPlanks}`}</b>
+            {hud.repairTarget === barricade.lane && <em style={{ width: `${barricade.repair * 100}%` }} />}
+          </div>
+        ))}
+      </aside>
+
       {showBriefing && screen === 'playing' && (
         <div className="briefing-toast">
-          <span>◇</span><div><small>MỤC TIÊU MỚI</small><strong>BĂNG QUA KHU PHỐ CÁCH LY</strong><p>Di chuyển về phía trước · Đội AI sẽ yểm trợ</p></div>
+          <span>▥</span><div><small>MỤC TIÊU ENDLESS</small><strong>GIỮ 3 BARRICADE · ĐÓNG LẠI VÁN</strong><p>Áp sát cửa · Giữ E hoặc nút SỬA VÁN · Sống lâu nhất có thể</p></div>
+        </div>
+      )}
+
+      {totalPlanks < maxPlanks && screen === 'playing' && (
+        <div className={`repair-prompt ${hud.repairTarget >= 0 ? 'active' : ''}`}>
+          <b>{hud.repairTarget >= 0 ? 'ĐANG ĐÓNG VÁN' : coarse ? 'ĐẾN GẦN CỬA · GIỮ SỬA VÁN' : 'ĐẾN GẦN CỬA · GIỮ [E] ĐÓNG VÁN'}</b>
+          <span><i style={{ width: `${hud.repairTarget >= 0 ? (hud.barricades[hud.repairTarget]?.repair ?? 0) * 100 : 0}%` }} /></span>
         </div>
       )}
 
@@ -1235,6 +1364,7 @@ export default function Home() {
       <div className="mobile-actions">
         <button className="action-small reload-action" aria-label="Nạp đạn" onClick={beginReload}>↻<small>NẠP</small></button>
         <button className="action-small sprint-action" aria-label="Chạy nước rút" onPointerDown={() => { if (runtimeRef.current) runtimeRef.current.sprintHeld = true; }} onPointerUp={() => { if (runtimeRef.current) runtimeRef.current.sprintHeld = false; }}>»<small>CHẠY</small></button>
+        <button className="action-small repair-action" aria-label="Giữ để sửa ván" onPointerDown={(event) => { event.stopPropagation(); if (runtimeRef.current) runtimeRef.current.repairHeld = true; }} onPointerUp={() => { if (runtimeRef.current) runtimeRef.current.repairHeld = false; }} onPointerCancel={() => { if (runtimeRef.current) runtimeRef.current.repairHeld = false; }}>▥<small>SỬA VÁN</small></button>
         <button className="fire-action" aria-label="Bắn" onPointerDown={(event) => { event.stopPropagation(); initAudio(); if (runtimeRef.current) runtimeRef.current.fireHeld = true; shoot(); }} onPointerUp={() => { if (runtimeRef.current) runtimeRef.current.fireHeld = false; }}><span>●</span><small>BẮN</small></button>
       </div>
 
@@ -1247,7 +1377,7 @@ export default function Home() {
               <div className="result-grid">
                 <span><small>ĐIỂM</small><b>{hud.score.toLocaleString('vi-VN')}</b></span>
                 <span><small>TIÊU DIỆT</small><b>{hud.kills}</b></span>
-                <span><small>THỜI GIAN</small><b>{formatTime(hud.time)}</b></span>
+                <span><small>WAVE ĐẠT ĐƯỢC</small><b>{hud.wave}</b></span>
                 <span><small>KỶ LỤC</small><b>{bestScore.toLocaleString('vi-VN')}</b></span>
               </div>
             ) : (
